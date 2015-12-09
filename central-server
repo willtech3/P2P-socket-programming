@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+import socket
+import pdb
+import select
+import random
+import sys
+
+host = socket.gethostbyname(socket.gethostname())
+port = 5555
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    server_socket.bind((host, port))
+except socket.error as e:
+    print(str(e))
+server_socket.listen(10)
+inputs = [sys.stdin, server_socket]
+peers = []
+global current_id
+current_id = 0
+
+while inputs:
+    readable, writeable, exceptional = select.select(inputs, [], [])
+    if sys.stdin in readable:
+        option = readable[0].readline().rstrip("\n")
+        if 'quit' in option:
+            print("Shutting down the central server.")
+            break
+        else:
+            print("Type quit to exit.")
+    else:
+        for sock in readable:
+            if sock is server_socket:
+                conn, addr = sock.accept()
+                host, port = addr
+                inputs.append(conn)
+            else:
+                data = sock.recv(4096)
+                request = data.decode('utf-8')
+                if "id-request" in request:
+                    host, port = sock.getpeername()
+                    for peer in peers:
+                        peer_id, peer_name, peer_host, peer_port = peer
+                        if peer_host == host:
+                            sock.send(str.encode(str(peer_id)))
+                elif "disconnecting" in request:
+                    request_info = request.split(" ")
+                    for peer in peers:
+                        ident, name, host, port = peer
+                        if name == request_info[0]:
+                            peers.remove(peer)
+                        print("Current Peer Listing")
+                        for peer in peers:
+                            print(str(peer))
+                        print("\n")
+                elif "id-request" not in request and request != '':
+                    host, port = sock.getpeername()
+                    peers.append((current_id,'',host,port))
+                    current_id += 1
+                    for i in range(len(peers)):
+                        ident, name, hostname, portnum = peers[i]
+                        if hostname == host:
+                            information = data.decode('utf-8').split("-")
+                            name = information[0]
+                            listening_port = information[1]
+                            named_peer = (ident, name, host, listening_port)
+                            peers[i] = named_peer
+
+                    if len(peers) == 1:
+                        sock.send(str.encode("Welcome, you are the first peer on the network.\n"))
+                        print("Current Peer Listing")
+                        for peer in peers:
+                            print(str(peer))
+                        print("\n")
+                    else:
+                        x = random.randint(0, len(peers) - 2)
+                        ident, name, host, port = peers[x]
+                        sock.send(str.encode(str(ident)+","+name +","+host+","+str(port)))
+                        print("Current Peer Listing")
+                        for peer in peers:
+                            print(str(peer))
+                        print("\n")
+                    inputs.remove(sock)
+                else:
+                    if sock not in inputs:
+                        sock.close()
+

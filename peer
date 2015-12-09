@@ -1,0 +1,224 @@
+#!/usr/bin/python3
+import socket
+import pdb
+import os
+import sys
+import select
+import time
+import random
+
+def run():
+    directory = sys.argv[1]
+    central_server = sys.argv[2]
+    peer_name = sys.argv[3]
+    peer_id = 0
+    host = socket.gethostbyname(socket.gethostname())
+    port = random.randint(20000, 65500)
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        server_socket.bind((host, port))
+    except socket.error as e:
+        print(str(e))
+    server_socket.listen(10)
+
+    inputs = [sys.stdin, server_socket]
+    outputs = []
+    errors = []
+    peers = []
+    peer_sockets = []
+
+    register_with_central_server(central_server, peers, peer_name, outputs, inputs, port)
+    print("Welcome to the peer program!")
+    print("************Select one of the following*************")
+    print("get - retrieves a file from a peer")
+    print("list - displays files available on this peer machine")
+    print("quit - terminates the program")
+    while True:
+        readable, writeable, exceptional = select.select(inputs, outputs, errors)
+        if sys.stdin in readable:
+            option = readable[0].readline().rstrip('\n')
+            if 'get' in option:
+                file_request = option.split(" ")
+                filename = ''
+                try:
+                    filename = file_request[1]
+                except Exception as e:
+                    print("A filename is required for the get method.")
+
+                if file_request[0] == 'get' and filename != '':
+                    get(filename, writeable, directory)
+                else:
+                    print('To request a file, type get followed by a space and then the name of the file.')
+            elif option == 'list':
+                list_files(directory)
+            elif option == 'quit':
+                quit(peer_name, outputs, writeable, inputs, central_server)
+                break
+            else:
+                print('Invalid selection. Please make another selection\n')
+        else:
+            for sock in readable:
+                if sock is server_socket:
+                    conn, addr = sock.accept()
+                    host, port = addr
+                    inputs.append(conn)
+                else:
+                    data = sock.recv(4096)
+                    if data:
+                        result = data.decode('utf-8')
+                        if "Connection request" in result:
+                            info = result.split("-")
+                            reconnection_info = info[1].split(",")
+                            new_peer = tuple(reconnection_info)
+                            socket_host, socket_port = sock.getpeername()
+                            print("A peer connection has been established by "+ reconnection_info[1])
+                            if new_peer not in peers:
+                                if sock not in outputs:
+                                    outputs.append(sock)
+                                peers.append(new_peer)
+                                peer_sockets.append(sock)
+                        if "disconnecting" in result:
+                            print(result)
+                            outputs.remove(sock)
+                            inputs.remove(sock)
+                            sock.close()
+                        if "GET" in result:
+                            request_info = result.split("-")
+                            filename = request_info[1]
+                            request_type = request_info[0]
+                            return_info = request_info[2].split(",")
+                            return_host = return_info[0]
+                            return_port = int(return_info[1])
+                            broadcast_from = request_info[3]
+                            if have_file(directory, filename):
+                               print("The requested file exists locally. Retrieving for upload")
+                               file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                               try:
+                                   file_send_socket.connect((return_host, return_port))
+                                   path = directory + "/" + filename
+                                   size_of_file = os.path.getsize(path)
+                                   file_send_socket.send(str.encode(str(size_of_file)))
+                                   total_sent = 0
+                                   file_d = open(path, 'rb')
+                                   print("uploading...")
+                                   while total_sent < size_of_file:
+                                       data_chunk = file_d.read(1024)
+                                       amount_sent = file_send_socket.send(data_chunk)
+                                       total_sent += amount_sent
+                                   file_d.close()
+                                   file_send_socket.close()
+                                   print("The file has been uploaded successfully")
+                               except socket.error as e:
+                                   print("Another peer provided the requested file, closing connection.")
+                                   file_send_socket.close()
+                            else:
+                                print("The requested file does not exist locally, rebroadcasting the request...")
+                                broadcast_to_peer_sockets(filename, writeable, broadcast_from, return_host, return_port)
+
+def get(filename, writeable, directory):
+    file_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        file_server_socket.bind((socket.gethostbyname(socket.gethostname()), 49999))
+    except socket.error as e:
+        print(str(e))
+    file_server_socket.listen(0)
+    broadcast_to_peer_sockets(filename, writeable, '', socket.gethostbyname(socket.gethostname()), 49999)
+    reader_sockets, writer_sockets, error_sockets = select.select([file_server_socket], [], [], 5)
+    if(len(reader_sockets) == 0):
+        print("admin: the requested file does not exist in the P2P system.")
+    else:
+        incoming_connection, incoming_address = file_server_socket.accept()
+        file_server_socket.close()
+        incoming_address, incoming_port = incoming_address
+        reader_sockets.append(incoming_connection)
+        reader_sockets.remove(file_server_socket)
+        file_size = incoming_connection.recv(1024).decode("utf-8")
+        if file_size:
+            total_received = 0
+            new_file = open(directory + "/" +filename, "wb")
+            print("downloading...")
+            while total_received < int(file_size):
+                data = incoming_connection.recv(1024)
+                value = len(data)
+                new_file.write(data)
+                total_received += value
+            new_file.close()
+            print("The requested file has been downloaded successfully")
+            incoming_connection.close()
+
+def broadcast_to_peer_sockets(filename, writeable, previous_host, orig_host, orig_port):
+        for sock in writeable:
+            host, port = sock.getpeername()
+            if host != previous_host:
+                sock.send(str.encode("GET-" + filename + "-" + orig_host + ","+ str(orig_port) + "-"+ socket.gethostbyname(socket.gethostname())))
+
+def list_files(path):
+    for file in os.listdir(path):
+        print(file)
+
+def have_file(path, filename):
+     if filename in os.listdir(path):
+         return True
+     return False
+
+def quit(peer_name, outputs, writeable, inputs, central_server):
+    host = socket.gethostbyname(socket.gethostname())
+    broadcast_disconnection_message_to_peers(peer_name, outputs, host, writeable, inputs)
+    unregister_with_central_server(central_server, peer_name)
+
+def broadcast_disconnection_message_to_peers(peer_name, outputs, host, writeable, inputs):
+    for sock in writeable:
+        sock.sendall(str.encode(peer_name + " is disconnecting from the peer network..."))
+        inputs.remove(sock)
+        outputs.remove(sock)
+        sock.close()
+
+def unregister_with_central_server(central_server, peer_name):
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client_socket.connect((central_server, 5555))
+        client_socket.sendall(str.encode(peer_name + " is disconnecting from the peer_network"))
+        client_socket.close()
+    except Exception as e:
+        print("The central server does not appear to be running")
+        client_socket.close()
+
+def register_with_central_server(central_server, peers, name, outputs, inputs, port):
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client_socket.connect((central_server, 5555))
+    except Exception as e:
+        print("The central server does not appear to be running, wait a few minutes and try again...")
+        raise e
+    client_socket.sendall(str.encode(name + "-" + str(port)))
+    global peer_id
+    peer_id = retrieve_id_from_central_server(central_server)
+    result = client_socket.recv(4096)
+    message = result.decode('utf-8')
+    if "Welcome" not in message:
+        values = message.split(",")
+        connection_info = tuple(values)
+        peers.append(connection_info)
+        create_connection_to_peer(peers, name, peer_id, outputs, inputs)
+
+def create_connection_to_peer(peers, current_name, peer_id, outputs, inputs):
+    ident, name, host, port = peers[len(peers) - 1]
+    peer_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    peer_client_socket.connect((host, int(port)))
+    host_name = socket.gethostbyname(socket.gethostname())
+    peer_client_socket.sendall(str.encode("Connection request from "+current_name+"-"+str(peer_id)+","+current_name+","+host_name+","+str(port)))
+    outputs.append(peer_client_socket)
+    inputs.append(peer_client_socket)
+
+def retrieve_id_from_central_server(central_server):
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((central_server, 5555))
+    client_socket.sendall(str.encode("id-request"))
+    result = client_socket.recv(4096).decode('utf-8')
+    peer_id = int(result)
+    client_socket.close()
+    return result
+
+run()
